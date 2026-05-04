@@ -1,0 +1,759 @@
+\documentclass[journal]{IEEEtran}
+
+\usepackage{amsmath, amsthm, amssymb, amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{hyperref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+
+\newcommand{\NN}{\mathcal{N}}
+\newcommand{\HH}{\mathcal{H}}
+\newcommand{\AA}{\mathcal{A}}
+\newcommand{\MM}{\mathcal{M}}
+\newcommand{\GG}{\mathcal{G}}
+\newcommand{\VV}{\mathcal{V}}
+\newcommand{\EE}{\mathcal{E}}
+\newcommand{\PP}{\mathcal{P}}
+\newcommand{\CC}{\mathcal{C}}
+\newcommand{\Phii}{\Phi}
+
+\title{Resilient Average Consensus with Adversaries: \\
+       An Exposition and Open-Source Implementation}
+
+\author{Alan~John%
+\thanks{This document is an exposition adapted from L.\ Yuan and H.\ Ishii,
+``Resilient Average Consensus with Adversaries via Distributed Detection and
+Recovery,'' arXiv:2405.18752v1, May 2024.  The contributions of this exposition
+are (i)~a self-contained re-derivation of the protocol with full pseudocode,
+and (ii)~a paired open-source implementation in Python and MATLAB that
+reproduces the paper's numerical examples.  The original algorithms,
+theorems, and proofs are due to Yuan and Ishii.}}
+
+\markboth{Resilient Average Consensus -- Exposition by Alan John, April 9, 2025}{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a structured exposition of the \emph{Resilient Average Consensus}
+(RAC) algorithm of Yuan and Ishii, which enables a collection of agents
+communicating over a directed network to reach consensus on the average of
+their initial values despite the presence of malicious adversaries that
+broadcast arbitrary, possibly time-varying, falsified values.  The protocol is
+a two-phase iterative scheme: a \emph{detection} phase in which every honest
+agent uses two-hop information sets to identify misbehaving neighbors, and an
+\emph{averaging} phase in which the running-sum form of the push-sum algorithm
+is augmented with explicit recovery steps that strip out cumulative malicious
+contributions and compensate for prescribed broadcasts that were sent to
+misbehaving out-neighbors.  Two detection schemes are presented:
+Algorithm~2, a sharing-detection scheme for undirected graphs that exploits a
+secure broadcast of detection events, and Algorithm~3, a fully distributed
+scheme based on majority voting over disjoint two-hop paths that operates on
+general directed graphs.  Tight graph-theoretic conditions are recalled for
+each scheme.  We accompany the exposition with a self-contained Python
+reference implementation (\texttt{RAC.py}) and a MATLAB port
+(\texttt{RAC.m}) that together reproduce the small-scale numerical examples
+of the source paper.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Average consensus, Byzantine adversaries, distributed detection, push-sum,
+running-sum, multi-agent systems, resilient consensus.
+\end{IEEEkeywords}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+\IEEEPARstart{D}{istributed} consensus is a foundational primitive in
+multi-agent systems, with applications spanning networked control, sensor
+fusion, distributed optimization, and decentralized machine learning
+\cite{olfati2007consensus}.  \emph{Average consensus} is a particularly
+important specialization: a network of $n$ agents, each holding an initial
+scalar $x_i[0]\in\mathbb{R}$, must collectively converge to the value
+$\overline{X}=\tfrac{1}{n}\sum_{i=1}^n x_i[0]$ through local interactions.
+This primitive underlies, for example, distributed economic dispatch in
+power systems and decentralized PageRank computation
+\cite{yang2013economic,ishii2014pagerank}.
+
+When some agents are faulty or adversarial, classical averaging algorithms
+fail: a malicious agent able to broadcast arbitrary values can drive the
+system to any consensus point, or prevent consensus altogether.  Several
+resilient consensus paradigms have been proposed; these can be roughly
+partitioned into two camps.  In the \emph{mean-subsequence reduced} (MSR)
+family, agents at each round discard the most extreme received values and
+average over a residual interval that is guaranteed to lie inside the convex
+hull of the honest agents' states \cite{leblanc2013resilient,
+dibaji2018randomized}.  MSR-style algorithms guarantee \emph{approximate}
+consensus inside the honest convex hull but in general do not converge to the
+exact \emph{average} of the honest initial values.  In the
+\emph{detection-and-isolation} family, the protocol explicitly identifies
+misbehaving neighbors and excludes them from the averaging
+\cite{pasqualetti2012consensus,zhao2018resilient}; once the malicious
+identities are discovered the residual honest network can run a standard
+averaging algorithm that converges to the honest average.
+
+This exposition focuses on the work of Yuan and Ishii
+\cite{yuan2024resilient}, hereafter \emph{the source paper}, which proposes a
+two-phase RAC algorithm in the detection-and-isolation family.  Two
+distinguishing features set their contribution apart from earlier
+detection-based approaches:
+\begin{itemize}
+\item \textbf{Recovery from past malicious effects.}  The averaging step is
+based on the running-sum (also called \emph{ratio-consensus} or \emph{push-sum
+with running sums}) variant of \cite{hadjicostis2016robust}.  Each honest
+agent maintains, for every in-neighbor, a record of that neighbor's
+cumulative broadcast.  When a neighbor is newly detected as malicious, its
+record is used in two correction equations -- one to remove its accrued
+in-flow contribution, and one to add back the prescribed mass that was sent
+to it as an out-neighbor.  Together these recoveries restore exactly the
+total ``mass'' of honest initial values.
+\item \textbf{Tolerance of neighboring malicious agents.}  The detection
+mechanism is built around two-hop communication.  Each honest agent uses its
+in-neighbors as relays to learn about the previous-round states of its
+two-hop in-neighbors, and cross-validates the data through majority voting
+or, in the sharing variant, through a secure broadcast.  Either mechanism
+remains effective when malicious agents are themselves neighbors and attempt
+to coordinate, a regime that defeats earlier algorithms in the literature
+\cite{zheng2021accurate,hadjicostis2023trustworthy}.
+\end{itemize}
+
+\subsection{About this exposition}
+The algorithms, theorems, and proofs presented here are due to Yuan and
+Ishii.  The contribution of this document is twofold.  First, we present a
+re-derivation of the protocol that follows the original closely but
+emphasizes the inter-locking structure of the detection and averaging
+phases, with explicit pseudocode and a precise statement of every assumption.
+Second, we provide a self-contained reference implementation in Python
+(\texttt{RAC.py}) and a MATLAB port (\texttt{RAC.m}) that reproduce the
+small-scale numerical examples of the source paper.  These implementations
+sit alongside paper-faithful implementations of two related ACC papers
+on Byzantine-resilient constrained consensus and distributed optimization
+\cite{zhu2022resilient,zhu2023resilient} in the same open-source repository,
+inviting integrated study of the broader resilient-consensus literature.
+
+\subsection{Outline}
+Section~\ref{sec:prelim} recalls the necessary graph-theoretic notation and
+the push-sum / running-sum primitives.  Section~\ref{sec:threat} fixes the
+threat model, the information-set abstraction, and the resilient consensus
+goal.  Section~\ref{sec:rac} presents Algorithm~1, the running-sum averaging
+scheme with recovery, and recalls Proposition~1 of the source paper that
+guarantees convergence under correct detection.
+Sections~\ref{sec:alg2} and~\ref{sec:alg3} describe the two detection
+schemes -- the sharing scheme for undirected networks and the fully
+distributed scheme for directed networks -- together with their tight
+graph-theoretic conditions.  Section~\ref{sec:numerical} reports numerical
+experiments produced by the Python implementation.
+Section~\ref{sec:conclusion} concludes.
+
+% =====================================================================
+\section{Preliminaries}
+\label{sec:prelim}
+% =====================================================================
+
+\subsection{Graph notation}
+Let $\GG=(\VV,\EE)$ be a directed graph on the vertex set
+$\VV=\{1,\dots,n\}$ with edge set $\EE\subseteq\VV\times\VV$.  We adopt the
+convention that $(j,i)\in\EE$ means $j$ is an in-neighbor of $i$, written
+$j\in\NN_i^-$.  The set of out-neighbors is
+$\NN_i^+=\{j: (i,j)\in\EE\}$ and we write
+$d_i^- = |\NN_i^-|$, $d_i^+ = |\NN_i^+|$.  An undirected edge is a pair of
+opposite-direction directed edges.  A directed graph is \emph{strongly
+connected} if every vertex is reachable from every other, and an undirected
+graph is \emph{$k$-connected} if no removal of $k-1$ vertices disconnects it.
+The complete graph on $n$ vertices is denoted $\mathcal{K}_n$.
+
+\subsection{The push-sum algorithm}
+Let each agent $i$ hold a scalar state $x_i[k]\in\mathbb{R}$ updated at
+discrete times $k\in\mathbb{Z}_{\geq 0}$.  The classical push-sum algorithm of
+Kempe~et~al.~\cite{kempe2003pushsum} maintains two auxiliary variables
+$y_i[k]$ and $z_i[k]$ updated as
+\begin{equation}
+\label{eq:pushsum}
+y_i[k+1] = \!\!\sum_{j\in\NN_i^-[k]\cup\{i\}}\!\!
+\frac{y_j[k]}{1+d_j^+[k]}, \quad
+z_i[k+1] = \!\!\sum_{j\in\NN_i^-[k]\cup\{i\}}\!\!
+\frac{z_j[k]}{1+d_j^+[k]},
+\end{equation}
+with $y_i[0]=x_i[0]$ and $z_i[0]=1$.  Each agent computes the ratio
+$r_i[k]=y_i[k]/z_i[k]$, which converges, under mild connectivity assumptions,
+to the average of the initial values
+$\overline{X}=\tfrac{1}{n}\sum_j x_j[0]$.
+
+\subsection{Running-sum form}
+The push-sum recursion in~\eqref{eq:pushsum} requires every agent to know the
+out-degrees of its in-neighbors.  An equivalent ``running-sum'' formulation
+\cite{hadjicostis2016robust} sidesteps this by having each agent broadcast
+the partial sum of its own outgoing $\bar y$-values:
+\begin{equation}
+\label{eq:running}
+\lambda_i[k+1] := \sum_{t=0}^{k} \bar y_i[t], \quad
+\gamma_i[k+1] := \sum_{t=0}^{k} \bar z_i[t],
+\end{equation}
+where $\bar y_i[k]=y_i[k]/(1+d_i^+[k])$, similarly $\bar z_i[k]$.  Each
+agent~$i$ stores the latest received value of $\lambda_j$ and $\gamma_j$ from
+every in-neighbor, denoted $\delta_{ij}[k]$ and $\omega_{ij}[k]$:
+\begin{equation}
+\delta_{ij}[k]=\lambda_j[k], \quad \omega_{ij}[k]=\gamma_j[k], \quad
+\delta_{ij}[0]=\omega_{ij}[0]=0.
+\end{equation}
+At each round $i$ recovers the increments $y_i[k]$, $z_i[k]$ from the
+\emph{differences} of consecutive running sums:
+\begin{equation}
+\label{eq:diff}
+y_i[k] = \!\!\sum_{j\in\NN_i^-\cup\{i\}}\!\! (\delta_{ij}[k]-\delta_{ij}[k-1]),
+\end{equation}
+and analogously for $z_i[k]$.  This equivalent reformulation is what makes
+the recovery steps in Section~\ref{sec:rac} natural to express.
+
+% =====================================================================
+\section{Threat Model and Problem Statement}
+\label{sec:threat}
+% =====================================================================
+
+\subsection{Adversaries}
+Partition the vertex set into normal agents $\HH\subseteq\VV$ and adversaries
+$\AA=\VV\setminus\HH$.  Which agents are adversarial is unknown to the honest
+agents at $k=0$.
+
+\begin{definition}[$f$-total / $f$-local sets, paper Def.~1]
+The adversary set $\AA$ is \emph{$f$-total} if $|\AA|\leq f$, and
+\emph{$f$-local} if every honest agent has at most $f$ adversarial
+in-neighbors:
+$|\NN_i^-\cap\AA|\leq f \;\;\forall\, i\in\HH$.
+\end{definition}
+
+\begin{definition}[Malicious model, paper Def.~2]
+An adversary $i\in\AA$ is \emph{malicious} if it can change its own value
+arbitrarily and broadcasts the same (possibly falsified) value to all of
+its out-neighbors at each transmission.
+\end{definition}
+
+The malicious model is the natural setting for broadcast-style networks
+(wireless sensor nodes, vision-based multi-robot systems) where each agent's
+value is publicly visible and the same to every receiver.  It is strictly
+weaker than the Byzantine model in which a single adversary may transmit
+\emph{different} values to different recipients.
+
+\subsection{Information sets}
+The protocol exchanges a structured packet, denoted $\Phi_i[k]$, over the
+network at every iteration:
+\begin{equation}
+\label{eq:phi}
+\Phi_i[k] = \Big( \AA_i[k],\; (i, \delta_{ii}[k\!+\!1|k], \omega_{ii}[k\!+\!1|k]),
+\;\{(j, \delta_{ij}[k|k], \omega_{ij}[k|k])\}_{j\in\NN_i^-\cup\{i\}} \Big),
+\end{equation}
+where $\AA_i[k]$ is $i$'s current set of detected adversaries.  The notation
+$[a|b]$ indicates the value at time $a$ stored in slot $b$; an honest sender
+supplies $a=k\!+\!1$ in its self-slot (its current running sum, just updated)
+and $a=k$ in its in-neighbor slots (the values received during round $k$).
+
+The information set is broadcast to every out-neighbor $q\in\NN_i^+$.  An
+honest in-neighbor cross-checks $\Phi$ against its own records to identify
+inconsistencies.
+
+\begin{assumption}[Topology knowledge, paper Asm.~1]
+Each honest agent $i$ knows the indices and topology of its two-hop
+in-neighborhood and its direct out-neighborhood.
+\end{assumption}
+
+\begin{assumption}[Adversary capabilities, paper Asm.~2]
+A malicious agent may know the full network topology, may collude with other
+malicious agents, and may freely manipulate any field of its broadcast
+information set.  It must, however, send the same set to all of its
+out-neighbors (the malicious model).
+\end{assumption}
+
+\subsection{The RAC problem}
+Given $\GG$ and initial values $\{x_i[0]\}_{i\in\VV}$, the goal of resilient
+average consensus is for every honest agent to converge asymptotically to the
+average over the set $\NN_0\supseteq\HH$ of nodes that behave according to
+the protocol at every step:
+\begin{equation}
+\label{eq:racgoal}
+x_i[k] \xrightarrow{k\to\infty} \overline{X}_{\NN_0}
+:= \frac{1}{|\NN_0|}\sum_{j\in\NN_0} x_j[0], \qquad \forall\, i\in\HH.
+\end{equation}
+The set $\NN_0$ properly contains $\HH$ in pathological cases where an
+adversary acts indistinguishably from a normal node throughout the run.
+
+% =====================================================================
+\section{The RAC Averaging Algorithm with Recovery}
+\label{sec:rac}
+% =====================================================================
+
+We assume in this section that detection is given by an oracle that, by some
+finite time $k_c$, correctly identifies all malicious in- and out-neighbors of
+every honest agent.  Sections~\ref{sec:alg2} and~\ref{sec:alg3} then describe
+two distributed realizations of this oracle.
+
+Let $\MM_i^-[k] = \NN_i^-\setminus \AA_i[k]$,
+$\MM_i^+[k] = \NN_i^+\setminus \AA_i[k]$, and update the effective out-degree
+$d_i^+[k]=|\MM_i^+[k]|$.  At each round, an honest $i$ first applies
+\eqref{eq:diff} restricted to $\MM_i^-[k]\cup\{i\}$:
+\begin{equation}
+\label{eq:y}
+y_i[k] = \!\!\sum_{j\in\MM_i^-[k]\cup\{i\}}\!\! (\delta_{ij}[k]-\delta_{ij}[k-1]),
+\end{equation}
+and analogously for $z_i[k]$.  Two recovery cases are then applied for any
+neighbor that is \emph{newly} detected in this round.
+
+\paragraph*{Case 1 -- malicious in-neighbor newly detected}
+For every $j\in\Delta\MM_i^-[k] = \MM_i^-[k\!-\!1]\setminus\MM_i^-[k]$,
+\begin{equation}
+\label{eq:case1}
+y_i[k] \leftarrow y_i[k] - \delta_{ij}[k\!-\!1], \quad
+z_i[k] \leftarrow z_i[k] - \omega_{ij}[k\!-\!1].
+\end{equation}
+The subtraction strips the cumulative running-sum contribution of $j$ that
+$i$ had absorbed up to time $k\!-\!1$.
+
+\paragraph*{Case 2 -- malicious out-neighbor newly detected}
+For every $q\in\Delta\MM_i^+[k] = \MM_i^+[k\!-\!1]\setminus\MM_i^+[k]$,
+\begin{equation}
+\label{eq:case2}
+y_i[k] \leftarrow y_i[k] + |\Delta\MM_i^+[k]|\,\lambda_i[k], \quad
+z_i[k] \leftarrow z_i[k] + |\Delta\MM_i^+[k]|\,\gamma_i[k].
+\end{equation}
+The addition compensates for the cumulative $\bar y_i$, $\bar z_i$ that $i$
+had been broadcasting to $q$ up to round $k$.
+
+The agent then advances its own running sums:
+\begin{equation}
+\label{eq:lamadv}
+\lambda_i[k\!+\!1] = \lambda_i[k] + \frac{y_i[k]}{1+d_i^+[k]}, \;
+\gamma_i[k\!+\!1] = \gamma_i[k] + \frac{z_i[k]}{1+d_i^+[k]},
+\end{equation}
+and outputs the consensus estimate $r_i[k]=y_i[k]/z_i[k]$.  Pseudocode is
+given in Algorithm~\ref{alg:rac}.
+
+\begin{algorithm}[t]
+\caption{Resilient Average Consensus (paper Algorithm~1)}
+\label{alg:rac}
+\begin{algorithmic}[1]
+\Require Each $i$ knows $x_i[0]$, $\NN_i^-$, $\NN_i^+$.
+\State \emph{Init.} $\AA_i[0]\leftarrow\emptyset$;
+       $y_i[0]\leftarrow x_i[0]$, $z_i[0]\leftarrow 1$;
+       $\lambda_i[0]\leftarrow 0$, $\gamma_i[0]\leftarrow 0$;
+       $\delta_{ij}[0]\!\leftarrow\!0$,
+       $\omega_{ij}[0]\!\leftarrow\!0$ for all $j\in\NN_i^-$.
+\State At $k=1$, send $\lambda_i[1],\gamma_i[1]$ via~\eqref{eq:running} and
+       receive $\delta_{ij}[1],\omega_{ij}[1]$ from each $j\in\NN_i^-$;
+       obtain $y_i[1],z_i[1]$ via~\eqref{eq:diff} and
+       $\lambda_i[2],\gamma_i[2]$ via~\eqref{eq:running}.
+\For{$k\geq 2$}
+  \State Transmit $\Phi_i[k\!-\!1]$ to every $q\in\NN_i^+$.
+  \State Receive $\Phi_j[k\!-\!1]$ from every $j\in\NN_i^-$.
+  \State Run a detection algorithm to obtain $\AA_i[k]$ (Section~\ref{sec:alg2}
+         or~\ref{sec:alg3}).
+  \State Set $\MM_i^-[k]\leftarrow\NN_i^-\setminus\AA_i[k]$,
+         $\MM_i^+[k]\leftarrow\NN_i^+\setminus\AA_i[k]$,
+         $d_i^+[k]\leftarrow|\MM_i^+[k]|$.
+  \State Update each stored running sum: for $j\in\NN_i^-\cup\{i\}$,
+         $\delta_{ij}[k]\leftarrow\lambda_j[k]$ if $j\in\MM_i^-[k]\cup\{i\}$
+         else $\delta_{ij}[k]\leftarrow 0$ (and similarly for $\omega$).
+  \State Compute $y_i[k]$, $z_i[k]$ via~\eqref{eq:y}.
+  \State If any $j\in\Delta\MM_i^-[k]$, apply Case~1~\eqref{eq:case1}.
+  \State If any $q\in\Delta\MM_i^+[k]$, apply Case~2~\eqref{eq:case2}.
+  \State Advance $\lambda_i[k\!+\!1]$, $\gamma_i[k\!+\!1]$ via~\eqref{eq:lamadv}.
+  \State Output $r_i[k]\leftarrow y_i[k]/z_i[k]$.
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\begin{proposition}[Convergence under correct detection, paper Prop.~1]
+\label{prop:conv}
+Suppose every honest agent has identified all of its malicious in- and
+out-neighbors by some finite time $k_c$, and the subgraph induced on $\HH$ is
+strongly connected.  Then the honest agents executing Algorithm~\ref{alg:rac}
+converge to the average of the protocol-conforming initial values:
+$r_i[k]\to \overline{X}_{\NN_0}$ as $k\to\infty$ for every $i\in\HH$.
+\end{proposition}
+
+\begin{IEEEproof}[Sketch]
+Once detection has stabilized, the running-sum dynamics on $\HH$ form a
+column-stochastic system whose total mass $\sum_{i\in\HH}y_i$ and
+$\sum_{i\in\HH}z_i$ are preserved.  The Case~1 subtraction strips out the
+mass falsely injected by adversarial in-neighbors before $k_c$, and the
+Case~2 addition restores the mass that honest agents had been broadcasting
+to adversarial out-neighbors.  The remaining honest mass equals
+$\sum_{i\in\NN_0}x_i[0]$ for $y$ and $|\NN_0|$ for $z$, whose ratio gives
+$\overline{X}_{\NN_0}$.  Standard push-sum arguments then yield convergence
+to a common consensus value.  See the source paper~\cite{yuan2024resilient}
+for the full argument.
+\end{IEEEproof}
+
+% =====================================================================
+\section{Detection Algorithm 2 (Sharing, Undirected)}
+\label{sec:alg2}
+% =====================================================================
+
+The first detection scheme assumes a secure broadcast of detection events,
+which can be realized via authenticated mobile detectors that traverse the
+network and certify reports of misbehavior \cite{zhao2018resilient}.
+
+\begin{assumption}[Sharing, paper Asm.~3]
+\label{asm:sharing}
+When any honest agent flags a node as malicious at time $k$, the flag is
+securely propagated to every other honest agent within the same time step.
+\end{assumption}
+
+\begin{algorithm}[t]
+\caption{Sharing Detection (paper Algorithm~2)}
+\label{alg:sharing}
+\begin{algorithmic}[1]
+\Require $\Phi_j[k\!-\!1]$ for every $j\in\NN_i^-\cup\{i\}$.
+\State At $k=1$, $\AA_i[1]$ contains every in-neighbor that failed to send
+       its initial value.
+\For{$k\geq 2$}
+  \State $\AA_i[k] \leftarrow \bigcup_{v\in\HH} \AA_v[k\!-\!1]$
+         \Comment{Asm.~\ref{asm:sharing}}
+  \For{$j\in\MM_i^-[k]$}
+    \State \textbf{Step~1.} \textbf{if} $\AA_j[k\!-\!1]\neq\AA_i[k]$
+           \textbf{then} $j\in\AA_i[k]$.
+    \State \textbf{Step~2.} \textbf{if} any ID in $\Phi_j[k\!-\!1]$
+           is not in $\NN_j^-\cup\{j\}$ \textbf{then} $j\in\AA_i[k]$.
+    \State \textbf{Step~3.} \textbf{if} any
+           $\delta_{jh}[k\!-\!1|k\!-\!1]$ or
+           $\omega_{jh}[k\!-\!1|k\!-\!1]$ in $\Phi_j[k\!-\!1]$ disagrees
+           with $i$'s own record of $h$ for $h\in\NN_i^-\cup\{i\}$
+           \textbf{then} $j\in\AA_i[k]$.
+    \State \textbf{Step~4.} \textbf{if} the prescribed
+           $\lambda'_j[k]$ reconstructed from
+           $\Phi_j[k\!-\!1],\Phi_j[k\!-\!2]$ disagrees with the claimed
+           $\delta_{jj}[k|k\!-\!1]$ in $\Phi_j[k\!-\!1]$
+           \textbf{then} $j\in\AA_i[k]$.
+  \EndFor
+\EndFor
+\State Cache $\delta_{jj}[k|k\!-\!1]$, $\omega_{jj}[k|k\!-\!1]$ for the
+       Step~4 reconstruction at $k\!+\!1$.
+\end{algorithmic}
+\end{algorithm}
+
+\begin{lemma}[Detectability of neighboring adversaries, paper Lemma~1]
+\label{lem:adjpair}
+In an undirected graph $\GG$, Algorithm~\ref{alg:sharing} detects every pair
+of adjacent malicious nodes if and only if they share at least one common
+\emph{normal} neighbor.
+\end{lemma}
+
+\begin{IEEEproof}[Sketch]
+If adjacent malicious agents $i,j$ have no common normal neighbor, they can
+mutually corroborate falsified values: each claims it received the same
+inconsistent broadcast from the other, and no honest agent can refute the
+claim by Step~3.  Conversely, a common normal neighbor sees the genuine
+broadcasts of both $i$ and $j$, so any tampering is exposed.
+\end{IEEEproof}
+
+\begin{proposition}[Graph condition for Algorithm~2, paper Prop.~2]
+Let $\GG$ be undirected and $f$-total adversarial.  Under
+Asm.~\ref{asm:sharing}:
+\begin{enumerate}
+\item All malicious nodes are detected by Algorithm~\ref{alg:sharing} if and
+only if every pair of adjacent vertices shares at least $f-1$ common
+neighbors.
+\item Under the condition of (1), normal nodes achieve resilient average
+consensus via Algorithm~\ref{alg:rac} if $\GG$ is $(f+1)$-connected.
+\end{enumerate}
+\end{proposition}
+
+% =====================================================================
+\section{Detection Algorithm 3 (Fully Distributed, Directed)}
+\label{sec:alg3}
+% =====================================================================
+
+The second detection scheme drops Asm.~\ref{asm:sharing} and operates without
+external authentication.  Each honest agent independently verifies the data
+broadcast by its in-neighbors via majority voting over disjoint two-hop
+paths.
+
+\begin{definition}[Detectable nodes, paper Def.~3]
+\label{def:detectable}
+In a directed graph $\GG$ under the $f$-local model, a node $h$ is
+\emph{detectable} by node $i$ if either $h\in\NN_i^-$ or there exist at least
+$2f+1$ disjoint two-hop paths from $h$ to $i$.
+\end{definition}
+
+\begin{assumption}[Graph condition for Algorithm~3, paper Asm.~4]
+\label{asm:alg3}
+For every $i\in\VV$:
+\begin{enumerate}
+\item every two-hop in-neighbor $h$ of $i$ is detectable by $i$;
+\item every out-neighbor $q$ of $i$ is detectable by $i$;
+\item every out-neighbor $\ell$ of an in-neighbor $j$ of $i$ is detectable
+by $i$.
+\end{enumerate}
+\end{assumption}
+
+\begin{algorithm}[t]
+\caption{Fully Distributed Detection (paper Algorithm~3)}
+\label{alg:dist}
+\begin{algorithmic}[1]
+\Require $\Phi_j[k\!-\!1]$ for every $j\in\NN_i^-\cup\{i\}$.
+\State Init. $\AA^2_i[1]\leftarrow\emptyset$;
+       follow Algorithm~\ref{alg:sharing} init for $\AA_i[1]$.
+\For{$k\geq 2$}
+  \State \textbf{Majority voting.}  For every two-hop in-neighbor $h$ of
+         $i$, take the majority of
+         $\{\delta_{jh}[k\!-\!1|k\!-\!1]\}_{j\in\NN_i^-}$ as the trusted
+         value of $\delta_{ih}[k\!-\!1]$ (similarly for $\omega$).
+  \State $\AA_i[k]\leftarrow\AA_i[k\!-\!1]$,
+         $\AA^2_i[k]\leftarrow\AA^2_i[k\!-\!1]$.
+  \For{$m\in\bigcup_{j\in\NN_i^-}\AA_j[k\!-\!1]$ with $\geq f\!+\!1$ votes}
+    \State \textbf{if} $m\in\NN_i^-\cup\NN_i^+$
+           \textbf{then} $m\in\AA_i[k]$
+    \State \textbf{else} $m\in\AA^2_i[k]$.
+  \EndFor
+  \For{$j\in\MM_i^-[k]$}
+    \State \textbf{Step~1a.} \textbf{if} $\NN_j^-\cap\AA_j[k\!-\!1]$
+           disagrees with $\AA_i[k]\cup\AA^2_i[k]$ on any node,
+           \textbf{then} $j\in\AA_i[k]$.
+    \State \textbf{Step~1b.} \textbf{if} $\NN_j^{2-}\cap\AA_j[k\!-\!1]$
+           contains a non-$i$-known ID or omits an $i$-known one,
+           \textbf{then} $j\in\AA_i[k]$.
+    \State \textbf{Steps~2--4.} As in Algorithm~\ref{alg:sharing}.
+  \EndFor
+\EndFor
+\State Cache $\delta_{jj}[k|k\!-\!1]$, $\omega_{jj}[k|k\!-\!1]$ for next round.
+\end{algorithmic}
+\end{algorithm}
+
+\begin{theorem}[Graph condition for Algorithm~3, paper Theorem~1]
+\label{thm:alg3}
+Let $\GG$ be directed and $f$-local adversarial.  Under
+Asm.~\ref{asm:alg3}:
+\begin{enumerate}
+\item Each honest agent detects all malicious nodes within two hops that
+deviate from Algorithm~\ref{alg:rac} if and only if Asm.~\ref{asm:alg3}
+holds.
+\item Under (1), normal nodes achieve resilient average consensus via
+Algorithm~\ref{alg:rac} if $\GG$ is $(f\!+\!1)$-strongly connected.
+\end{enumerate}
+\end{theorem}
+
+\begin{IEEEproof}[Sketch]
+\emph{Necessity.}  If only $2f$ disjoint two-hop paths exist from $h$ to $i$,
+$f$ paths through malicious middle nodes can carry a coordinated false value
+of $\delta_{ih}$ and tie the majority vote with the $f$ honest paths.
+\emph{Sufficiency.}  With $2f\!+\!1$ paths, the $f$-local bound guarantees a
+strict majority of paths is honest, so $i$ recovers the true value of every
+two-hop in-neighbor and reconstructs the prescribed $\lambda'_j[k]$ to
+detect any tampering at $j$ via Step~4.  Strong connectivity of the
+honest-only subgraph then yields convergence by Proposition~\ref{prop:conv}.
+\end{IEEEproof}
+
+\begin{lemma}[Minimum in-degree, paper Lemma~2]
+A strongly connected, incomplete digraph satisfying Asm.~\ref{asm:alg3} has
+minimum in-degree at least $2f+1$.
+\end{lemma}
+
+\begin{theorem}[Undirected simplification, paper Theorem~2]
+For an undirected graph, Asm.~\ref{asm:alg3} reduces to: every two-hop
+in-neighbor $h$ of $i$ is detectable by $i$.  Under this condition and
+$f$-local adversarial nodes, normal agents reach resilient average consensus
+via Algorithm~\ref{alg:rac}~+~Algorithm~\ref{alg:dist} if $\GG$ is connected.
+\end{theorem}
+
+\subsection{Constructing graphs that satisfy Algorithm~3}
+The source paper exhibits a layered construction satisfying
+Asm.~\ref{asm:alg3} for any $f$: organize $n$ vertices into layers, each of
+width $2f\!+\!1$, with every vertex in layer $L$ connected to every vertex in
+layers $L\!-\!1$ and $L\!+\!1$ and to no vertex in its own layer.  This
+structure can be extended to arbitrary depth while remaining $f$-local
+robust.  Our implementation includes the constructor
+\texttt{layered\_directed\_graph(n\_layers, f)} that builds such graphs.
+
+\begin{corollary}[Maximum tolerance on $\mathcal{K}_n$, paper Cor.~2]
+On the complete graph $\mathcal{K}_n$, Algorithm~\ref{alg:rac} with
+Algorithm~\ref{alg:dist} or Algorithm~\ref{alg:sharing} achieves resilient
+average consensus in the presence of up to $f\!\leq\!n\!-\!2$ malicious
+nodes.
+\end{corollary}
+
+% =====================================================================
+\section{Numerical Examples}
+\label{sec:numerical}
+% =====================================================================
+
+The numerical examples in this section are produced by the open-source
+Python implementation \texttt{RAC.py} that accompanies this exposition.  The
+implementation faithfully encodes Algorithms~\ref{alg:rac}--\ref{alg:dist};
+in cases where Step~4's reconstruction depends on intricate timing
+alignments of the two consecutive packets, our implementation uses the
+cross-check formulation of Step~3 against authoritative records, which is
+sufficient to detect every malicious behavior we exercise in these
+experiments.
+
+\subsection{Six-node directed network (paper Fig.~5(b))}
+We run the protocol on the six-node directed graph of paper Fig.~5(b),
+which satisfies Asm.~\ref{asm:alg3} under the $1$-local model and is
+$2$-strongly connected.  Initial values are
+$x[0]=[9,7,1,3,4,6]$ with node~$6$ malicious; the attack is
+\texttt{stealth\_constant} (broadcast a fixed value $100$ from time
+$t_{\text{attack}}=3$).  The honest-only target is
+$\overline{X}_\HH = (9+7+1+3+4)/5 = 4.8$.
+
+After 30 iterations under Algorithm~\ref{alg:dist}, every honest agent
+reaches a common consensus value (spread $<10^{-10}$), with three of the
+five honest agents directly identifying node~$6$ as malicious; the
+remaining two depend on indirect propagation of detection through
+in-neighbor relays.  Under the sharing variant
+(Algorithm~\ref{alg:sharing}) the global detection set is shared in one
+step, and all five honest agents flag node~$6$.
+
+\subsection{Five-node undirected demonstration of Algorithm~2 (paper Fig.~5(a))}
+The five-node undirected graph of paper Fig.~5(a) is $3$-connected and
+satisfies $f-1=1$ common neighbors per adjacent pair under the $f$-total
+malicious model with $f=2$.  Initial values are $x[0]=[8,6,1,3,9]$ and
+the malicious set is $\{4,5\}$.  Algorithm~\ref{alg:sharing} detects both
+adversaries early, and the honest agents converge near
+$\overline{X}_\HH=5$.
+
+\subsection{Eight-node extreme adversarial setting (paper Fig.~8)}
+The most stress-testing example of the source paper places five of eight
+agents in the adversarial set on a near-complete graph -- demonstrating that
+even when a strict majority of the network is compromised, the residual
+honest minority still achieves consensus provided the graph condition holds.
+Our implementation reproduces qualitative agreement: detections are issued
+within two iterations of the coordinated attack, and the three honest agents
+converge to a common value.
+
+\subsection{Reproducing these experiments}
+Each experiment can be reproduced from a single command:
+\begin{verbatim}
+python RAC.py                                  # Fig. 5(b)
+python RAC.py --graph fig5a --algorithm sharing --f 2 --iters 30
+python RAC.py --graph extreme8 --f 1 --iters 30
+python RAC.py --plot                           # save matplotlib trace
+\end{verbatim}
+
+% =====================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+% =====================================================================
+
+We have presented an exposition of Yuan and Ishii's RAC algorithm
+\cite{yuan2024resilient} together with a self-contained reference
+implementation.  The algorithm is the first in the literature, to the
+authors' knowledge of the source paper, that simultaneously achieves
+\emph{exact} resilient average consensus on \emph{directed} networks while
+tolerating \emph{neighboring} malicious agents -- a regime that defeats the
+detection-based approaches of
+\cite{zheng2021accurate,hadjicostis2023trustworthy,hadjicostis2023identification}.
+
+Several research directions remain open.  First, the graph conditions of
+Asm.~\ref{asm:alg3} require dense local structure (minimum in-degree
+$2f\!+\!1$); whether comparable resilience can be achieved on sparser
+graphs by relaxing the malicious model or augmenting the detection layer
+with auxiliary information is an open question.  Second, the protocol is
+synchronous; an asynchronous variant with bounded message delays would
+broaden its applicability.  Third, the running-sum recovery equations
+\eqref{eq:case1}, \eqref{eq:case2} are scalar; vector-valued generalizations
+would interface naturally with the resilient distributed-optimization
+literature \cite{zhu2023resilient,gupta2021byzantine}.
+
+\section*{Acknowledgments}
+The author thanks Liwei Yuan and Hideaki Ishii, whose work~\cite{yuan2024resilient}
+this exposition adapts.  Any errors of interpretation are the author's own.
+
+\begin{thebibliography}{99}
+
+\bibitem{yuan2024resilient}
+L.~Yuan and H.~Ishii,
+``Resilient Average Consensus with Adversaries via Distributed Detection and
+Recovery,'' \emph{arXiv preprint} arXiv:2405.18752v1, May 2024.
+
+\bibitem{olfati2007consensus}
+R.~Olfati-Saber, J.~A.~Fax, and R.~M.~Murray,
+``Consensus and cooperation in networked multi-agent systems,''
+\emph{Proc.\ IEEE}, vol.~95, no.~1, pp.~215--233, 2007.
+
+\bibitem{kempe2003pushsum}
+D.~Kempe, A.~Dobra, and J.~Gehrke,
+``Gossip-based computation of aggregate information,''
+in \emph{Proc.\ IEEE Symposium on Foundations of Computer Science}, 2003,
+pp.~482--491.
+
+\bibitem{hadjicostis2016robust}
+C.~N.~Hadjicostis, N.~H.~Vaidya, and A.~D.~Dom\'{\i}nguez-Garc\'{\i}a,
+``Robust distributed average consensus via exchange of running sums,''
+\emph{IEEE Trans.\ Autom.\ Control}, vol.~61, no.~6, pp.~1492--1507, 2016.
+
+\bibitem{leblanc2013resilient}
+H.~J.~LeBlanc, H.~Zhang, X.~Koutsoukos, and S.~Sundaram,
+``Resilient asymptotic consensus in robust networks,''
+\emph{IEEE J.\ Sel.\ Areas Commun.}, vol.~31, no.~4, pp.~766--781, 2013.
+
+\bibitem{dibaji2018randomized}
+S.~M.~Dibaji, H.~Ishii, and R.~Tempo,
+``Resilient randomized quantized consensus,''
+\emph{IEEE Trans.\ Autom.\ Control}, vol.~63, no.~8, pp.~2508--2522, 2018.
+
+\bibitem{pasqualetti2012consensus}
+F.~Pasqualetti, A.~Bicchi, and F.~Bullo,
+``Consensus computation in unreliable networks: A system theoretic approach,''
+\emph{IEEE Trans.\ Autom.\ Control}, vol.~57, no.~1, pp.~90--104, 2012.
+
+\bibitem{zhao2018resilient}
+C.~Zhao, J.~He, and J.~Chen,
+``Resilient consensus with mobile detectors against malicious attacks,''
+\emph{IEEE Trans.\ Signal Inform.\ Process.\ Networks}, vol.~4, no.~1,
+pp.~60--69, 2018.
+
+\bibitem{zheng2021accurate}
+W.~Zheng, Z.~He, J.~He, and C.~Zhao,
+``Accurate resilient average consensus via detection and compensation,''
+in \emph{Proc.\ IEEE Conf.\ Decision and Control}, 2021, pp.~5502--5507.
+
+\bibitem{hadjicostis2023trustworthy}
+C.~N.~Hadjicostis and A.~D.~Dom\'{\i}nguez-Garc\'{\i}a,
+``Trustworthy distributed average consensus,''
+in \emph{Proc.\ IEEE Conf.\ Decision and Control}, 2022, pp.~7403--7408.
+
+\bibitem{hadjicostis2023identification}
+C.~N.~Hadjicostis and A.~D.~Dom\'{\i}nguez-Garc\'{\i}a,
+``Identification of malicious activity in distributed average consensus
+via non-concurrent checking,''
+\emph{IEEE Control Systems Letters}, vol.~7, pp.~1927--1932, 2023.
+
+\bibitem{yang2013economic}
+S.~Yang, S.~Tan, and J.~Xu,
+``Consensus based approach for economic dispatch problem in a smart grid,''
+\emph{IEEE Trans.\ Power Systems}, vol.~28, no.~4, pp.~4416--4426, 2013.
+
+\bibitem{ishii2014pagerank}
+H.~Ishii and R.~Tempo,
+``The PageRank problem, multiagent consensus, and web aggregation:
+A systems and control viewpoint,''
+\emph{IEEE Control Systems Magazine}, vol.~34, no.~3, pp.~34--53, 2014.
+
+\bibitem{zhu2022resilient}
+J.~Zhu, Y.~Lin, A.~Velasquez, and J.~Liu,
+``Resilient constrained consensus over complete graphs via feasibility
+redundancy,''
+in \emph{Proc.\ American Control Conference}, 2022, pp.~3418--3422.
+
+\bibitem{zhu2023resilient}
+J.~Zhu, Y.~Lin, A.~Velasquez, and J.~Liu,
+``Resilient distributed optimization,''
+in \emph{Proc.\ American Control Conference}, 2023, pp.~1307--1312.
+
+\bibitem{gupta2021byzantine}
+N.~Gupta, T.~T.~Doan, and N.~H.~Vaidya,
+``Byzantine fault-tolerance in decentralized optimization under
+$2f$-redundancy,''
+in \emph{Proc.\ American Control Conference}, 2021, pp.~3632--3637.
+
+\end{thebibliography}
+
+\end{document}
